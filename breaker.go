@@ -27,9 +27,10 @@ type middleware struct {
 	width       int64
 }
 
-// Middleware returns a [fox.MiddlewareFunc] that rejects a share of requests when the failure ratio goes above the
-// configured ratio, based on the adaptive throttling described in the Google SRE book. Each route has its own state.
-// A panic counts as a failure, and a request canceled by the client is not counted.
+// Middleware returns a [fox.MiddlewareFunc] that probabilistically rejects requests when the failure ratio goes above
+// the configured ratio, based on the adaptive throttling described in the Google SRE book.
+// Each route gets its own instance of a given breaker. One instance can reject requests while another does not,
+// their state is not shared.
 func Middleware(opts ...Option) (fox.MiddlewareFunc, error) {
 	m, err := newMiddleware(opts...)
 	if err != nil {
