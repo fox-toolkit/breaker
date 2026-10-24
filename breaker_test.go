@@ -24,21 +24,26 @@ func status(code int) fox.HandlerFunc {
 	}
 }
 
-func newTestBreaker(t testing.TB, next fox.HandlerFunc, opts ...Option) *breaker {
-	t.Helper()
-	m, err := newMiddleware(opts...)
-	require.NoError(t, err)
-	return m.newBreaker(next)
+type testBreaker struct {
+	*Breaker
+	next fox.HandlerFunc
 }
 
-func serve(b *breaker, ctx context.Context) int {
+func newTestBreaker(t testing.TB, next fox.HandlerFunc, opts ...Option) *testBreaker {
+	t.Helper()
+	b, err := New(opts...)
+	require.NoError(t, err)
+	return &testBreaker{Breaker: b, next: next}
+}
+
+func serve(b *testBreaker, ctx context.Context) int {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequestWithContext(ctx, http.MethodGet, "/", nil)
-	b.serve(fox.NewTestContextOnly(w, r))
+	b.serve(fox.NewTestContextOnly(w, r), b.next)
 	return w.Code
 }
 
-func serveN(b *breaker, n int) (rejected int) {
+func serveN(b *testBreaker, n int) (rejected int) {
 	for range n {
 		if serve(b, context.Background()) == http.StatusServiceUnavailable {
 			rejected++
@@ -65,6 +70,8 @@ func TestOptions_Invalid(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Middleware(tc.opt)
+			assert.ErrorIs(t, err, ErrInvalidConfig)
+			_, err = New(tc.opt)
 			assert.ErrorIs(t, err, ErrInvalidConfig)
 		})
 	}
@@ -270,7 +277,7 @@ func TestMiddleware_DefaultReject(t *testing.T) {
 		for range 1000 {
 			w := httptest.NewRecorder()
 			r := httptest.NewRequest(http.MethodGet, "/", nil)
-			b.serve(fox.NewTestContextOnly(w, r))
+			b.serve(fox.NewTestContextOnly(w, r), b.next)
 			if w.Code == http.StatusServiceUnavailable {
 				assert.Equal(t, http.StatusText(http.StatusServiceUnavailable)+"\n", w.Body.String())
 				return
@@ -308,6 +315,78 @@ func TestMiddleware_PerRoute(t *testing.T) {
 			assert.Equal(t, http.StatusOK, call("/ok"))
 		}
 		assert.Positive(t, rejected)
+	})
+}
+
+func TestBreaker_SharedAcrossRoutes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b, err := New()
+		require.NoError(t, err)
+		f := fox.MustRouter()
+		f.MustAdd(fox.MethodGet, "/fail", status(http.StatusInternalServerError), fox.WithMiddleware(b.Middleware()))
+		f.MustAdd(fox.MethodGet, "/ok", status(http.StatusOK), fox.WithMiddleware(b.Middleware()))
+
+		call := func(path string) int {
+			w := httptest.NewRecorder()
+			f.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+			return w.Code
+		}
+		for range 100 {
+			call("/fail")
+		}
+		time.Sleep(200 * time.Millisecond)
+		call("/fail")
+
+		var rejected int
+		for range 100 {
+			if call("/ok") == http.StatusServiceUnavailable {
+				rejected++
+			}
+		}
+		assert.Positive(t, rejected)
+	})
+}
+
+func TestBreaker_KeepsStateOnUpdate(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b, err := New()
+		require.NoError(t, err)
+		f := fox.MustRouter()
+		f.MustAdd(fox.MethodGet, "/api", status(http.StatusInternalServerError), fox.WithMiddleware(b.Middleware()))
+
+		call := func() int {
+			w := httptest.NewRecorder()
+			f.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api", nil))
+			return w.Code
+		}
+		for range 100 {
+			call()
+		}
+		time.Sleep(200 * time.Millisecond)
+		call()
+
+		_, err = f.Update(fox.MethodGet, "/api", status(http.StatusOK), fox.WithMiddleware(b.Middleware()))
+		require.NoError(t, err)
+
+		var rejected int
+		for range 100 {
+			if call() == http.StatusServiceUnavailable {
+				rejected++
+			}
+		}
+		assert.Positive(t, rejected)
+	})
+}
+
+func TestBreaker_RejectRatio(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := newTestBreaker(t, status(http.StatusInternalServerError))
+		serveN(b, 100)
+		time.Sleep(200 * time.Millisecond)
+		assert.InDelta(t, DefaultMaxRejectRatio, b.RejectRatio(), 1e-9)
+
+		time.Sleep(DefaultWindow)
+		assert.Zero(t, b.RejectRatio())
 	})
 }
 
