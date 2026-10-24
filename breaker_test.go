@@ -8,6 +8,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -73,6 +74,32 @@ func TestOptions_Invalid(t *testing.T) {
 			assert.ErrorIs(t, err, ErrInvalidConfig)
 			_, err = New(tc.opt)
 			assert.ErrorIs(t, err, ErrInvalidConfig)
+		})
+	}
+}
+
+func TestDefaultFailure(t *testing.T) {
+	cases := []struct {
+		status int
+		want   bool
+	}{
+		{http.StatusOK, false},
+		{http.StatusNotFound, false},
+		{http.StatusInternalServerError, true},
+		{http.StatusNotImplemented, false},
+		{http.StatusBadGateway, true},
+		{http.StatusServiceUnavailable, true},
+		{http.StatusGatewayTimeout, true},
+		{http.StatusHTTPVersionNotSupported, false},
+		{http.StatusInsufficientStorage, false},
+		{http.StatusNetworkAuthenticationRequired, false},
+	}
+	for _, tc := range cases {
+		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c := fox.NewTestContextOnly(w, httptest.NewRequest(http.MethodGet, "/", nil))
+			c.Writer().WriteHeader(tc.status)
+			assert.Equal(t, tc.want, DefaultFailure(c))
 		})
 	}
 }

@@ -131,9 +131,13 @@ func WithRejectHandler(handler fox.HandlerFunc) Option {
 	})
 }
 
-// DefaultFailure reports a response status of 500 or above as a failure.
+// DefaultFailure reports a response status of 500, 502, 503 or 504 as a failure.
 func DefaultFailure(c *fox.Context) bool {
-	return c.Writer().Status() >= http.StatusInternalServerError
+	switch c.Writer().Status() {
+	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
 }
 
 // DefaultReject responds with 503 Service Unavailable.
