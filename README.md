@@ -5,10 +5,8 @@
 
 # Breaker
 
-Breaker is a middleware for [Fox](https://github.com/fox-toolkit/fox) that rejects a share of requests when a route
-fails too often, so a failing handler or upstream gets room to recover. It is based on the adaptive throttling described in
-the [Google SRE book](https://sre.google/sre-book/handling-overload/): instead of opening and closing a circuit, each
-request is rejected with a probability that follows the recent failure ratio.
+Breaker is a middleware for [Fox](https://github.com/fox-toolkit/fox) that rejects requests to a failing route, using
+the adaptive throttling described in the [Google SRE book](https://sre.google/sre-book/handling-overload/).
 
 ## Disclaimer
 The current API is not yet stabilized. Breaking changes may occur before v1.0.0 and will be noted on the release note.
@@ -21,9 +19,8 @@ go get -u github.com/fox-toolkit/breaker
 ````
 ### Feature
 - One state per route, no lock on the request path and no allocation.
-- Rejects with probability `(requests - k * accepts) / (requests + 1)` over a sliding window.
-- A share of requests always reaches the handler, so recovery is detected without timers.
-- Configurable failure definition and rejection response (503 by default).
+- Configurable failure ratio, window, cap and minimum number of requests.
+- Configurable failure definition and rejection response.
 
 ### Usage
 ````go

@@ -88,9 +88,8 @@ type breaker struct {
 	next      fox.HandlerFunc
 	threshold atomic.Uint64
 	lastEval  atomic.Int64
-	// Keep the fields read on each request off the buckets written on each request, with 64-byte cache lines.
-	_       [8]byte
-	buckets [numBuckets]bucket
+	buckets   [numBuckets]bucket
+	lastEpoch atomic.Int64
 }
 
 type bucket struct {
@@ -99,11 +98,16 @@ type bucket struct {
 }
 
 func (b *breaker) serve(c *fox.Context) {
-	if t := b.threshold.Load(); t != 0 && rand.Uint64() < t { // nolint:gosec // load shedding, not security
-		now := b.elapsed()
-		b.record(now, false)
-		b.m.reject(c)
-		return
+	if t := b.threshold.Load(); t != 0 {
+		if r := rand.Uint64(); r < t { // nolint:gosec // used to draw rejected requests
+			now := b.elapsed()
+			// The threshold can predate an idle period.
+			if now-b.lastEval.Load() < evalInterval || r < b.evaluate(now) {
+				b.record(now, false)
+				b.m.reject(c)
+				return
+			}
+		}
 	}
 
 	ctx := c.Request().Context()
@@ -114,35 +118,65 @@ func (b *breaker) serve(c *fox.Context) {
 		}
 	}()
 	b.next(c)
-	ok = true
-	if ctx.Err() != context.Canceled {
-		b.record(b.elapsed(), !b.m.failure(c))
+	if ctx.Err() == context.Canceled {
+		ok = true
+		return
 	}
+	accepted := !b.m.failure(c)
+	ok = true
+	b.record(b.elapsed(), accepted)
 }
 
 func (b *breaker) elapsed() int64 {
 	return int64(time.Since(b.start))
 }
 
-// record counts a request in the bucket of now and updates the reject threshold at most every evalInterval.
 func (b *breaker) record(now int64, accepted bool) {
-	epoch := uint32(now / b.m.width) // nolint:gosec // wraps after 13 years at the smallest width
-	bk := &b.buckets[epoch%numBuckets]
-	bk.requests.inc(epoch)
+	e := now / b.m.width
+	epoch := uint32(e) // nolint:gosec // the epoch comparisons handle the wrap
+	if last := b.lastEpoch.Load(); e > last {
+		// After a very long idle period, the stored epochs may have wrapped. Reset the buckets.
+		if e-last >= 1<<30 {
+			b.reset(epoch)
+		}
+		b.lastEpoch.CompareAndSwap(last, e)
+	}
+	bk := &b.buckets[e%numBuckets]
+	// Accept before request, so a concurrent sum never counts a request without its accept.
 	if accepted {
 		bk.accepts.inc(epoch)
 	}
+	bk.requests.inc(epoch)
+	b.evaluate(now)
+}
 
+func (b *breaker) evaluate(now int64) uint64 {
 	last := b.lastEval.Load()
 	if now-last < evalInterval || !b.lastEval.CompareAndSwap(last, now) {
-		return
+		return b.threshold.Load()
 	}
+	epoch := uint32(now / b.m.width) // nolint:gosec // the epoch comparisons handle the wrap
 	var requests, accepts uint64
 	for i := range b.buckets {
-		requests += b.buckets[i].requests.load(epoch)
-		accepts += b.buckets[i].accepts.load(epoch)
+		r, rNewer := b.buckets[i].requests.load(epoch)
+		a, aNewer := b.buckets[i].accepts.load(epoch)
+		// Restarted with a newer epoch.
+		if rNewer || aNewer {
+			continue
+		}
+		requests += r
+		accepts += a
 	}
-	b.threshold.Store(b.m.threshold(requests, accepts))
+	t := b.m.threshold(requests, accepts)
+	b.threshold.Store(t)
+	return t
+}
+
+func (b *breaker) reset(epoch uint32) {
+	for i := range b.buckets {
+		b.buckets[i].requests.reset(epoch)
+		b.buckets[i].accepts.reset(epoch)
+	}
 }
 
 // counter holds the bucket epoch in the high 32 bits and the count in the low 32 bits.
@@ -151,24 +185,37 @@ type counter struct {
 }
 
 func (c *counter) inc(epoch uint32) {
-	for {
-		v := c.v.Add(1)
-		// Counted in the current or a newer bucket.
-		if int32(uint32(v>>32)-epoch) >= 0 { // nolint:gosec // wrapping difference
+	v := c.v.Add(1)
+	// A retry never writes a stale word.
+	for int32(uint32(v>>32)-epoch) < 0 { // nolint:gosec // wrapping difference
+		if c.v.CompareAndSwap(v, uint64(epoch)<<32|1) {
 			return
 		}
-		// Stale bucket: restart it with this request, or retry if another request changed it.
-		if c.v.CompareAndSwap(v, uint64(epoch)<<32|1) {
+		if v = c.v.Load(); int32(uint32(v>>32)-epoch) >= 0 { // nolint:gosec // wrapping difference
+			c.v.Add(1)
 			return
 		}
 	}
 }
 
-// load returns the count if the bucket is within the window ending at epoch.
-func (c *counter) load(epoch uint32) uint64 {
+// load returns the count within the window ending at epoch, and whether the bucket is newer.
+func (c *counter) load(epoch uint32) (uint64, bool) {
 	v := c.v.Load()
-	if epoch-uint32(v>>32) >= numBuckets {
-		return 0
+	d := int32(uint32(v>>32) - epoch) // nolint:gosec // wrapping difference
+	if d > 0 {
+		return 0, true
 	}
-	return v & (1<<32 - 1)
+	if d <= -numBuckets {
+		return 0, false
+	}
+	return v & (1<<32 - 1), false
+}
+
+func (c *counter) reset(epoch uint32) {
+	for {
+		v := c.v.Load()
+		if uint32(v>>32) == epoch || c.v.CompareAndSwap(v, uint64(epoch)<<32) {
+			return
+		}
+	}
 }
