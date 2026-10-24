@@ -8,6 +8,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -77,6 +78,32 @@ func TestOptions_Invalid(t *testing.T) {
 	}
 }
 
+func TestDefaultFailure(t *testing.T) {
+	cases := []struct {
+		status int
+		want   bool
+	}{
+		{http.StatusOK, false},
+		{http.StatusNotFound, false},
+		{http.StatusInternalServerError, false},
+		{http.StatusNotImplemented, false},
+		{http.StatusBadGateway, true},
+		{http.StatusServiceUnavailable, true},
+		{http.StatusGatewayTimeout, true},
+		{http.StatusHTTPVersionNotSupported, false},
+		{http.StatusInsufficientStorage, false},
+		{http.StatusNetworkAuthenticationRequired, false},
+	}
+	for _, tc := range cases {
+		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c := fox.NewTestContextOnly(w, httptest.NewRequest(http.MethodGet, "/", nil))
+			c.Writer().WriteHeader(tc.status)
+			assert.Equal(t, tc.want, DefaultFailure(c))
+		})
+	}
+}
+
 func TestMiddleware_Reject(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -99,7 +126,7 @@ func TestMiddleware_Reject(t *testing.T) {
 				var fail bool
 				b := newTestBreaker(t, func(c *fox.Context) {
 					if fail {
-						c.Writer().WriteHeader(http.StatusInternalServerError)
+						c.Writer().WriteHeader(http.StatusBadGateway)
 					}
 				}, tc.opts...)
 				for i := range tc.total {
@@ -124,7 +151,7 @@ func TestMiddleware_Recover(t *testing.T) {
 		fail := true
 		b := newTestBreaker(t, func(c *fox.Context) {
 			if fail {
-				c.Writer().WriteHeader(http.StatusInternalServerError)
+				c.Writer().WriteHeader(http.StatusBadGateway)
 			}
 		})
 		serveN(b, 100)
@@ -144,7 +171,7 @@ func TestMiddleware_RecoverGradually(t *testing.T) {
 		fail := true
 		b := newTestBreaker(t, func(c *fox.Context) {
 			if fail {
-				c.Writer().WriteHeader(http.StatusInternalServerError)
+				c.Writer().WriteHeader(http.StatusBadGateway)
 			}
 		})
 		serveN(b, 100)
@@ -177,7 +204,7 @@ func TestMiddleware_Panic(t *testing.T) {
 func TestMiddleware_RefreshAfterIdle(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		for range 100 {
-			b := newTestBreaker(t, status(http.StatusInternalServerError))
+			b := newTestBreaker(t, status(http.StatusBadGateway))
 			serveN(b, 100)
 			time.Sleep(200 * time.Millisecond)
 			serveN(b, 1)
@@ -192,7 +219,7 @@ func TestMiddleware_RefreshAfterIdle(t *testing.T) {
 
 func TestMiddleware_LongIdle(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		b := newTestBreaker(t, status(http.StatusInternalServerError), WithWindow(time.Second))
+		b := newTestBreaker(t, status(http.StatusBadGateway), WithWindow(time.Second))
 		serveN(b, 5)
 		time.Sleep(time.Duration(1<<31+10) * 100 * time.Millisecond)
 		serveN(b, 100)
@@ -218,7 +245,7 @@ func TestMiddleware_FailurePanic(t *testing.T) {
 
 func TestMiddleware_ClientCanceled(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		b := newTestBreaker(t, status(http.StatusInternalServerError))
+		b := newTestBreaker(t, status(http.StatusBadGateway))
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		for range 30 {
@@ -269,7 +296,7 @@ func TestMiddleware_CustomFailureAndReject(t *testing.T) {
 
 func TestMiddleware_DefaultReject(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		b := newTestBreaker(t, status(http.StatusInternalServerError), WithMaxRejectRatio(1))
+		b := newTestBreaker(t, status(http.StatusBadGateway), WithMaxRejectRatio(1))
 		serveN(b, 100)
 		time.Sleep(200 * time.Millisecond)
 		serveN(b, 1)
@@ -282,7 +309,7 @@ func TestMiddleware_DefaultReject(t *testing.T) {
 				assert.Equal(t, http.StatusText(http.StatusServiceUnavailable)+"\n", w.Body.String())
 				return
 			}
-			require.Equal(t, http.StatusInternalServerError, w.Code)
+			require.Equal(t, http.StatusBadGateway, w.Code)
 		}
 		t.Fatal("no request rejected")
 	})
@@ -293,7 +320,7 @@ func TestMiddleware_PerRoute(t *testing.T) {
 		mw, err := Middleware()
 		require.NoError(t, err)
 		f := fox.MustRouter(fox.WithMiddleware(mw))
-		f.MustAdd(fox.MethodGet, "/fail", status(http.StatusInternalServerError))
+		f.MustAdd(fox.MethodGet, "/fail", status(http.StatusBadGateway))
 		f.MustAdd(fox.MethodGet, "/ok", status(http.StatusOK))
 
 		call := func(path string) int {
@@ -323,7 +350,7 @@ func TestBreaker_SharedAcrossRoutes(t *testing.T) {
 		b, err := New()
 		require.NoError(t, err)
 		f := fox.MustRouter()
-		f.MustAdd(fox.MethodGet, "/fail", status(http.StatusInternalServerError), fox.WithMiddleware(b.Middleware()))
+		f.MustAdd(fox.MethodGet, "/fail", status(http.StatusBadGateway), fox.WithMiddleware(b.Middleware()))
 		f.MustAdd(fox.MethodGet, "/ok", status(http.StatusOK), fox.WithMiddleware(b.Middleware()))
 
 		call := func(path string) int {
@@ -352,7 +379,7 @@ func TestBreaker_KeepsStateOnUpdate(t *testing.T) {
 		b, err := New()
 		require.NoError(t, err)
 		f := fox.MustRouter()
-		f.MustAdd(fox.MethodGet, "/api", status(http.StatusInternalServerError), fox.WithMiddleware(b.Middleware()))
+		f.MustAdd(fox.MethodGet, "/api", status(http.StatusBadGateway), fox.WithMiddleware(b.Middleware()))
 
 		call := func() int {
 			w := httptest.NewRecorder()
@@ -380,7 +407,7 @@ func TestBreaker_KeepsStateOnUpdate(t *testing.T) {
 
 func TestBreaker_RejectRatio(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		b := newTestBreaker(t, status(http.StatusInternalServerError))
+		b := newTestBreaker(t, status(http.StatusBadGateway))
 		serveN(b, 100)
 		time.Sleep(200 * time.Millisecond)
 		assert.InDelta(t, DefaultMaxRejectRatio, b.RejectRatio(), 1e-9)
@@ -454,7 +481,7 @@ func TestMiddleware_Concurrent(t *testing.T) {
 		fail := n%2 == 0
 		mu.Unlock()
 		if fail {
-			c.Writer().WriteHeader(http.StatusInternalServerError)
+			c.Writer().WriteHeader(http.StatusBadGateway)
 		}
 	}, WithWindow(time.Second))
 	var wg sync.WaitGroup
