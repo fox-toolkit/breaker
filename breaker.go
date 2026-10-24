@@ -30,13 +30,25 @@ type middleware struct {
 // Middleware returns a [fox.MiddlewareFunc] that probabilistically rejects requests when the failure ratio goes above
 // the configured ratio, based on the adaptive throttling described in the Google SRE book.
 // Each route gets its own instance of a given breaker. One instance can reject requests while another does not,
-// their state is not shared.
+// their state is not shared. To share state across routes, use [New].
 func Middleware(opts ...Option) (fox.MiddlewareFunc, error) {
 	m, err := newMiddleware(opts...)
 	if err != nil {
 		return nil, err
 	}
-	return m.wrap, nil
+	return func(next fox.HandlerFunc) fox.HandlerFunc {
+		return m.newBreaker().wrap(next)
+	}, nil
+}
+
+// New returns a [Breaker] that probabilistically rejects requests when the failure ratio goes above the configured
+// ratio. Its state is shared by every handler wrapped by [Breaker.Middleware].
+func New(opts ...Option) (*Breaker, error) {
+	m, err := newMiddleware(opts...)
+	if err != nil {
+		return nil, err
+	}
+	return m.newBreaker(), nil
 }
 
 func newMiddleware(opts ...Option) (*middleware, error) {
@@ -56,14 +68,9 @@ func newMiddleware(opts ...Option) (*middleware, error) {
 	}, nil
 }
 
-func (m *middleware) wrap(next fox.HandlerFunc) fox.HandlerFunc {
-	return m.newBreaker(next).serve
-}
-
-func (m *middleware) newBreaker(next fox.HandlerFunc) *breaker {
-	return &breaker{
+func (m *middleware) newBreaker() *Breaker {
+	return &Breaker{
 		m:     m,
-		next:  next,
 		start: time.Now(),
 	}
 }
@@ -83,10 +90,10 @@ func (m *middleware) threshold(requests, accepts uint64) uint64 {
 	return uint64(min(p, m.maxReject) * (1 << 64))
 }
 
-type breaker struct {
+// Breaker is the state shared by every handler wrapped by its middleware.
+type Breaker struct {
 	start     time.Time
 	m         *middleware
-	next      fox.HandlerFunc
 	threshold atomic.Uint64
 	lastEval  atomic.Int64
 	buckets   [numBuckets]bucket
@@ -98,7 +105,23 @@ type bucket struct {
 	accepts  counter
 }
 
-func (b *breaker) serve(c *fox.Context) {
+// Middleware returns a [fox.MiddlewareFunc] that uses the state of b on every handler it wraps.
+func (b *Breaker) Middleware() fox.MiddlewareFunc {
+	return b.wrap
+}
+
+// RejectRatio returns the probability that the next request is rejected.
+func (b *Breaker) RejectRatio() float64 {
+	return float64(b.evaluate(b.elapsed())) / (1 << 64)
+}
+
+func (b *Breaker) wrap(next fox.HandlerFunc) fox.HandlerFunc {
+	return func(c *fox.Context) {
+		b.serve(c, next)
+	}
+}
+
+func (b *Breaker) serve(c *fox.Context, next fox.HandlerFunc) {
 	if t := b.threshold.Load(); t != 0 {
 		if r := rand.Uint64(); r < t { // nolint:gosec // used to draw rejected requests
 			now := b.elapsed()
@@ -118,7 +141,7 @@ func (b *breaker) serve(c *fox.Context) {
 			b.record(b.elapsed(), false)
 		}
 	}()
-	b.next(c)
+	next(c)
 	if ctx.Err() == context.Canceled {
 		ok = true
 		return
@@ -128,11 +151,11 @@ func (b *breaker) serve(c *fox.Context) {
 	b.record(b.elapsed(), accepted)
 }
 
-func (b *breaker) elapsed() int64 {
+func (b *Breaker) elapsed() int64 {
 	return int64(time.Since(b.start))
 }
 
-func (b *breaker) record(now int64, accepted bool) {
+func (b *Breaker) record(now int64, accepted bool) {
 	e := now / b.m.width
 	epoch := uint32(e) // nolint:gosec // the epoch comparisons handle the wrap
 	if last := b.lastEpoch.Load(); e > last {
@@ -151,7 +174,7 @@ func (b *breaker) record(now int64, accepted bool) {
 	b.evaluate(now)
 }
 
-func (b *breaker) evaluate(now int64) uint64 {
+func (b *Breaker) evaluate(now int64) uint64 {
 	last := b.lastEval.Load()
 	if now-last < evalInterval || !b.lastEval.CompareAndSwap(last, now) {
 		return b.threshold.Load()
@@ -173,7 +196,7 @@ func (b *breaker) evaluate(now int64) uint64 {
 	return t
 }
 
-func (b *breaker) reset(epoch uint32) {
+func (b *Breaker) reset(epoch uint32) {
 	for i := range b.buckets {
 		b.buckets[i].requests.reset(epoch)
 		b.buckets[i].accepts.reset(epoch)

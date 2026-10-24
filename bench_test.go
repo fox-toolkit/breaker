@@ -15,21 +15,21 @@ import (
 func noop(*fox.Context) {}
 
 func BenchmarkMiddleware(b *testing.B) {
-	br := newTestBreaker(b, noop)
+	h := newTestBreaker(b, noop).Middleware()(noop)
 	c := fox.NewTestContextOnly(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 	b.ReportAllocs()
 	for b.Loop() {
-		br.serve(c)
+		h(c)
 	}
 }
 
 func BenchmarkMiddleware_Parallel(b *testing.B) {
-	br := newTestBreaker(b, noop)
+	h := newTestBreaker(b, noop).Middleware()(noop)
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		c := fox.NewTestContextOnly(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 		for pb.Next() {
-			br.serve(c)
+			h(c)
 		}
 	})
 }
@@ -37,11 +37,12 @@ func BenchmarkMiddleware_Parallel(b *testing.B) {
 func BenchmarkMiddleware_Rejecting(b *testing.B) {
 	br := newTestBreaker(b, noop, WithMinRequests(0), WithRejectHandler(noop))
 	br.m.k = 0
+	h := br.Middleware()(noop)
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		c := fox.NewTestContextOnly(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
 		for pb.Next() {
-			br.serve(c)
+			h(c)
 		}
 	})
 }

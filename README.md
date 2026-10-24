@@ -19,7 +19,8 @@ The current API is not yet stabilized. Breaking changes may occur before v1.0.0 
 go get -u github.com/fox-toolkit/breaker
 ````
 ### Feature
-- One state per route, no lock on the request path and no allocation.
+- One breaker per route, or one breaker shared by several routes.
+- No lock on the request path and no allocation.
 - Configurable failure ratio, window, cap and minimum number of requests.
 - Configurable failure definition and rejection response.
 
@@ -39,18 +40,43 @@ import (
 )
 
 func main() {
-	mw, err := breaker.Middleware(breaker.WithFailureRatio(0.3))
+	// One breaker per route.
+	mw, err := breaker.Middleware()
 	if err != nil {
 		log.Fatalln(err)
 	}
 
-	f := fox.MustRouter(fox.WithMiddleware(mw))
+	// One breaker shared by every route it wraps.
+	b, err := breaker.New(breaker.WithFailureRatio(0.3))
+	if err != nil {
+		log.Fatalln(err)
+	}
 
-	target, _ := url.Parse("http://127.0.0.1:8081")
-	f.MustAdd(fox.MethodAny, "/api/*{any}", fox.WrapH(httputil.NewSingleHostReverseProxy(target)))
+	f := fox.MustRouter()
+
+	api, _ := url.Parse("http://127.0.0.1:8081")
+	apiProxy := fox.WrapH(httputil.NewSingleHostReverseProxy(api))
+	f.MustAdd(fox.MethodAny, "/api/*{any}", apiProxy, fox.WithMiddleware(mw))
+
+	orders, _ := url.Parse("http://127.0.0.1:8082")
+	ordersProxy := fox.WrapH(httputil.NewSingleHostReverseProxy(orders))
+	f.MustAdd(fox.MethodAny, "/orders", ordersProxy, fox.WithMiddleware(b.Middleware()))
+	f.MustAdd(fox.MethodAny, "/orders/{id}", ordersProxy, fox.WithMiddleware(b.Middleware()))
 
 	if err := http.ListenAndServe(":8080", f); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalln(err)
 	}
 }
+````
+
+To apply the breaker to every route of the router, prefer registering it for route handlers.
+
+````go
+mw, err := breaker.Middleware()
+if err != nil {
+	log.Fatalln(err)
+}
+
+// One breaker per route, for every route of the router.
+f := fox.MustRouter(fox.WithMiddlewareFor(fox.RouteHandler, mw))
 ````
