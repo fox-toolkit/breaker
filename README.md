@@ -1,5 +1,6 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/fox-toolkit/breaker.svg)](https://pkg.go.dev/github.com/fox-toolkit/breaker)
 [![tests](https://github.com/fox-toolkit/breaker/actions/workflows/tests.yaml/badge.svg)](https://github.com/fox-toolkit/breaker/actions?query=workflow%3Atests)
+[![codecov](https://codecov.io/gh/fox-toolkit/breaker/graph/badge.svg?token=LuWLomQtW0)](https://codecov.io/gh/fox-toolkit/breaker)
 ![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/fox-toolkit/breaker)
 ![GitHub go.mod Go version](https://img.shields.io/github/go-mod/go-version/fox-toolkit/breaker)
 
